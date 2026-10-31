@@ -108,6 +108,14 @@ special characters in uploaded file names with `_`.
 - The server also sends usage instructions when a client connects. Claude Code reads those; Griptape
   Nodes currently doesn't pass them to its agents, which is why the guide is a tool.
 
+## Reusing models you already downloaded
+
+ai-toolkit keeps ComfyUI-format weights in its own models folder for many models and downloads them
+there even when the model is already in your Hugging Face cache (LTX-2.5 always loads this way). When
+ai-toolkit runs on the same machine as this server, `create_job` / `update_job` point the job at the
+cached files instead and say so under `using_hf_cache`. Models that aren't cached get a warning before
+anything starts. The cache location comes from `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, or `HF_HOME`.
+
 ## Tips
 
 - `create_job(model=...)` applies the same settings the UI does when you pick a model. For edit models

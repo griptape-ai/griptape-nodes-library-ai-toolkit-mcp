@@ -144,6 +144,19 @@ with set_captions, then create_job(name=..., model=..., overrides={"trigger_word
 - Instruction/edit models (Kontext, Qwen-Image-Edit, etc.) train on before/after pairs with control
   images. Set those up in the ai-toolkit UI once and clone them; the presets don't configure controls.
 - The first run of a model downloads it (often tens of GB), so the first job looks slow to start.
+
+Downloads and the Hugging Face cache:
+- ai-toolkit prefers ComfyUI-format weight files kept in its own models folder (models_folder in
+  ai_toolkit_status) for many models, and downloads them there when missing, even if the same model
+  is already in the Hugging Face cache. LTX-2.5 only loads that way.
+- When ai-toolkit runs on this machine, create_job/update_job point the config at weights already in
+  the HF cache (reported under `using_hf_cache`): a cached snapshot folder for normal repos, or
+  model.model_kwargs.<component>_path files for split-file models like LTX-2.5. They warn when a
+  model isn't cached and will be downloaded. Tell the user before starting a job that will download.
+- Expected extra downloads: training adapters (e.g. Z-Image Turbo's assistant_lora_path) and small
+  config files come from the Hub separately.
+- If the user also runs ComfyUI, they can set ai-toolkit's models folder (UI Settings) to ComfyUI's
+  models folder so both share the same ComfyUI-format files.
 - Presets apply the same settings the UI does when you pick that model. Still read the resulting
   config (get_job_config) for anything that looks off.
 """,
@@ -192,7 +205,9 @@ nearly everything.
 # Monitoring a run
 
 - Right after start_job, check get_job_log: the first minutes are model download/load and latent
-  caching. Errors usually appear here (missing token, OOM, bad path).
+  caching. Errors usually appear here (missing token, OOM, bad path). If the log shows a multi-GB
+  "Downloading" the user didn't expect (start_job reports likely downloads), stop_job and check
+  topic "models" on the Hugging Face cache.
 - get_job shows step progress and speed; estimate time left from those.
 - Loss (get_loss) for these flow-matching models is noisy and doesn't track quality well. Use it to
   spot problems (NaN, sudden spikes, a jump after resuming), not to choose checkpoints.
@@ -214,6 +229,9 @@ nearly everything.
 - 401 / gated repo / "access to model is restricted": accept the model's license on Hugging Face and
   save an HF token in the ai-toolkit UI's Settings.
 - CUDA out of memory: see topic "vram". Also check whether another job or app holds the GPU.
+- Re-downloading a model that's already in the Hugging Face cache: ai-toolkit looked in its own models
+  folder instead. Recreate or update_job the job (from this server, with ai-toolkit on the same machine)
+  so it points at the cached files. See topic "models".
 - Job stuck "queued": another job is running on that GPU's queue (one at a time), or the queue was
   stopped. start_job restarts the queue.
 - Samples look like the base model even late in training: trigger word missing from sample prompts,

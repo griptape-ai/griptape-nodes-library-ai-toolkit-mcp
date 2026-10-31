@@ -9,6 +9,7 @@ from mcp_types import ToolAnnotations
 
 from .client import AIToolkitClient, AIToolkitError, clean_log, parse_config
 from .guide import GUIDE, TOPICS
+from .hfcache import download_warnings, hub_cache_dir, is_local, use_cached_weights
 from .models import ModelArch, apply_model, parse_model_archs
 from .template import default_caption_job_config, default_job_config
 
@@ -94,7 +95,13 @@ def archs(refresh: bool = False) -> dict[str, ModelArch]:
     return _archs
 
 
-def _finalize(name: str, cfg: dict, overrides: dict | None, model: str | None = None) -> dict:
+def _local_cache() -> Path | None:
+    """The HF cache, if ai-toolkit runs on this machine (so it shares the same cache)."""
+    cache = hub_cache_dir()
+    return cache if is_local(client().base_url) and cache.is_dir() else None
+
+
+def _finalize(name: str, cfg: dict, overrides: dict | None, model: str | None = None) -> tuple[dict, list[str]]:
     cfg["config"]["name"] = name
     proc = cfg["config"]["process"][0]
     if model:
@@ -108,7 +115,8 @@ def _finalize(name: str, cfg: dict, overrides: dict | None, model: str | None = 
     proc["training_folder"] = settings.get("TRAINING_FOLDER", proc.get("training_folder"))
     proc.setdefault("device", "cuda")
     proc.setdefault("logging", {"log_every": 1, "use_ui_logger": True})
-    return cfg
+    cache = _local_cache()
+    return cfg, (use_cached_weights(proc, cache) if cache else [])
 
 
 def _norm(p: str) -> str:
@@ -169,6 +177,8 @@ def _review(cfg: dict) -> list[str]:
             f"{arch.label} is gated: accept its license at {arch.gate_url} and save an HF token in the ai-toolkit "
             "UI's Settings, or the job fails while downloading."
         )
+    if cache := _local_cache():
+        warnings += download_warnings(proc, cache)
     if arch and arch.group == "instruction":
         warnings.append(f"{arch.label} is an edit model that needs control images; check the dataset controls in the UI.")
     return warnings
@@ -189,6 +199,8 @@ def ai_toolkit_status() -> str:
             "training_folder": settings.get("TRAINING_FOLDER"),
             "datasets_folder": settings.get("DATASETS_FOLDER"),
             "hf_token_set": bool(settings.get("HF_TOKEN")),
+            "models_folder": settings.get("MODELS_PATH"),
+            "hf_cache": str(_local_cache() or "not visible (ai-toolkit is remote or no cache)"),
             "gpus": [
                 {
                     "index": g["index"],
@@ -450,7 +462,7 @@ def create_job(
         cfg = parse_config(c.resolve_job(base_job))
     else:
         cfg = default_job_config()
-    cfg = _finalize(name, cfg, overrides, model)
+    cfg, cache_notes = _finalize(name, cfg, overrides, model)
     warnings = _review(cfg)
     job = c.save_job(name, cfg, gpu_ids)
     started = start and not warnings
@@ -458,6 +470,8 @@ def create_job(
         c.start_job(job)
         job = c.resolve_job(job["id"])
     result: dict[str, Any] = {"created": _summary(job), "started": started}
+    if cache_notes:
+        result["using_hf_cache"] = cache_notes
     if warnings:
         result["warnings"] = warnings
         if start:
@@ -480,9 +494,11 @@ def update_job(
     if existing["status"] in ("running", "stopping", "queued"):
         raise AIToolkitError(f"Job '{existing['name']}' is {existing['status']}; stop it before editing.")
     cfg = _parse_config_text(config) if config else parse_config(existing)
-    cfg = _finalize(existing["name"], cfg, overrides, model)
+    cfg, cache_notes = _finalize(existing["name"], cfg, overrides, model)
     saved = c.save_job(existing["name"], cfg, gpu_ids or existing["gpu_ids"], job_id=existing["id"])
     result: dict[str, Any] = {"updated": _summary(saved)}
+    if cache_notes:
+        result["using_hf_cache"] = cache_notes
     if warnings := _review(cfg):
         result["warnings"] = warnings
     return _dump(result)
@@ -490,11 +506,18 @@ def update_job(
 
 @mcp.tool(annotations=WRITE)
 def start_job(job: str) -> str:
-    """Queue a job and start its GPU queue. Resumes from the last checkpoint if one exists."""
+    """Queue a job and start its GPU queue. Resumes from the last checkpoint if one exists.
+    Also reports model weights that aren't in the local Hugging Face cache and will be downloaded."""
     c = client()
     j = c.resolve_job(job)
     c.start_job(j)
-    return _dump(_summary(c.resolve_job(j["id"])))
+    result: dict[str, Any] = {"job": _summary(c.resolve_job(j["id"]))}
+    cache = _local_cache()
+    if cache and j.get("job_type") in (None, "train"):
+        proc = (parse_config(j).get("config", {}).get("process") or [{}])[0]
+        if downloads := download_warnings(proc, cache):
+            result["downloads"] = downloads + ["Watch get_job_log; stop_job if this download wasn't expected."]
+    return _dump(result)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False))
