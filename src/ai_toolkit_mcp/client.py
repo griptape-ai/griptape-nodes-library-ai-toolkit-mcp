@@ -86,6 +86,24 @@ class AIToolkitClient:
         self.get(f"/api/jobs/{job['id']}/start")
         self.get(f"/api/queue/{quote(job['gpu_ids'], safe='')}/start")
 
+    def upload_files(self, dataset: str, paths: list[str]) -> list[str]:
+        files = []
+        try:
+            for p in paths:
+                files.append(("files", (os.path.basename(p), open(p, "rb"))))
+            resp = self._request(
+                "POST", "/api/datasets/upload", data={"datasetName": dataset}, files=files, timeout=600
+            )
+        finally:
+            for _, (_, fh) in files:
+                fh.close()
+        return resp.json().get("files", [])
+
+    def list_dataset_files(self, dataset: str) -> tuple[str, list[str]]:
+        """Returns (dataset folder with trailing separator, file paths relative to it)."""
+        data = self.post("/api/datasets/listImages", {"datasetName": dataset})
+        return data.get("root", ""), data.get("images", [])
+
     def image_bytes(self, local_path: str) -> bytes:
         return self.get_bytes(f"/api/img/{quote(local_path, safe='')}")
 

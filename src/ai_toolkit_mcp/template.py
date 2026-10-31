@@ -83,3 +83,44 @@ _DEFAULT_JOB_CONFIG = {
 
 def default_job_config() -> dict:
     return copy.deepcopy(_DEFAULT_JOB_CONFIG)
+
+
+# Ported from ai-toolkit ui/src/helpers/captionJobConfig.ts (defaultCaptionJobConfig).
+_DEFAULT_CAPTION_JOB_CONFIG = {
+    "job": "extension",
+    "config": {
+        "name": "Caption Directory",
+        "process": [
+            {
+                "type": "Qwen3OmniCaptioner",
+                "device": "cuda",
+                "caption": {
+                    "model_name_or_path": "ai-toolkit/Qwen3-Omni-30B-A3B-Thinking",
+                    "dtype": "bf16",
+                    "quantize": True,
+                    "qtype": "convrot8",
+                    "low_vram": False,
+                    "extensions": ["mp4", "mov", "webm", "mkv", "avi", "jpg", "jpeg", "png", "bmp", "webp", "mp3", "wav", "flac", "ogg"],
+                    "path_to_caption": "",
+                    "recaption": False,
+                    "compile": True,
+                    "caption_extension": "txt",
+                    "caption_prompt": (
+                        "Caption this video as if you were going to try to generate it with a video generator. "
+                        "Describe the visual content, how it moves and changes over time, and the camera work. Also "
+                        "describe the audio, including any speech, music, or sound effects, and transcribe spoken "
+                        'dialogue verbatim in quotes. Be decisive by stating things as they are. Do not say things like '
+                        '"It appears that" Or "possibly". No preamble. Just get to the point.'
+                    ),
+                    "max_res": 512,
+                    "max_new_tokens": 512,
+                    "batch_size": 1,
+                },
+            }
+        ],
+    },
+}
+
+
+def default_caption_job_config() -> dict:
+    return copy.deepcopy(_DEFAULT_CAPTION_JOB_CONFIG)

@@ -1,4 +1,6 @@
 import logging
+import uuid
+from pathlib import Path
 from typing import Any, Literal
 
 import yaml
@@ -6,14 +8,15 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp_types import ToolAnnotations
 
 from .client import AIToolkitClient, AIToolkitError, clean_log, parse_config
-from .template import default_job_config
+from .template import default_caption_job_config, default_job_config
 
 mcp = MCPServer(
     "ai-toolkit",
     instructions=(
         "Drives LoRA / fine-tune training in ostris ai-toolkit through its web UI's API. "
         "Jobs created here appear in the ai-toolkit UI and run through its per-GPU queue. "
-        "Typical flow: ai_toolkit_status -> list_datasets -> create_job (from new_job_template or "
+        "Typical flow: ai_toolkit_status -> list_datasets (or create_dataset from local files, then get_captions / "
+        "set_captions or auto_caption_dataset) -> create_job (from new_job_template or "
         "an existing job via base_job) -> start_job -> poll get_job / get_job_log / get_loss -> view_samples. "
         "Prefer cloning a previous job with base_job + overrides: its model block is already known to work "
         "on this machine. Ask before starting or stopping training; runs can take hours of GPU time."
@@ -144,6 +147,132 @@ def list_datasets() -> str:
             pass
         out.append(entry)
     return _dump(out) if out else f"No datasets in {root}."
+
+
+MEDIA_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".mkv", ".avi", ".mp3", ".wav", ".flac", ".ogg")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+UPLOAD_BATCH = 16
+
+IMAGE_CAPTION_PROMPT = (
+    "Caption this image as if you were going to generate it with an image generator. Describe the subject, "
+    "setting, composition, lighting, and style. Be decisive by stating things as they are. Do not say things "
+    'like "It appears that" or "possibly". No preamble. Just get to the point.'
+)
+
+
+def _collect_files(paths: list[str], caption_ext: str) -> list[str]:
+    exts = MEDIA_EXTS + (f".{caption_ext}",)
+    found: list[str] = []
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            found += sorted(str(f) for f in p.rglob("*") if f.is_file() and f.suffix.lower() in exts)
+        elif p.is_file():
+            found.append(str(p))
+        else:
+            raise AIToolkitError(f"Not found on this machine: {raw}")
+    return found
+
+
+@mcp.tool(annotations=WRITE)
+def create_dataset(name: str, paths: list[str], caption_ext: str = "txt") -> str:
+    """Create a dataset (or add to an existing one) by uploading local files into ai-toolkit.
+
+    `paths` are files or folders on the machine running this MCP server; folders are searched recursively
+    for images, videos, audio, and matching caption files (e.g. photo1.jpg + photo1.txt). Files are sent
+    over the UI's API, so this also works when ai-toolkit runs on another machine.
+    """
+    c = client()
+    files = _collect_files(paths, caption_ext.lstrip("."))
+    if not files:
+        raise AIToolkitError("No media or caption files found in those paths.")
+    uploaded: list[str] = []
+    for i in range(0, len(files), UPLOAD_BATCH):
+        uploaded += c.upload_files(name, files[i : i + UPLOAD_BATCH])
+    root, listed = c.list_dataset_files(name)
+    return _dump(
+        {
+            "dataset": name,
+            "path": root.rstrip("\\/"),
+            "uploaded_files": len(uploaded),
+            "media_in_dataset": len(listed),
+            "captions_uploaded": sum(1 for f in uploaded if f.lower().endswith(f".{caption_ext.lstrip('.')}")),
+        }
+    )
+
+
+@mcp.tool(annotations=READ)
+def get_captions(dataset: str, caption_ext: str = "txt", limit: int = 200) -> str:
+    """Captions for each file in a dataset (empty string = uncaptioned), plus a count of missing ones."""
+    c = client()
+    root, files = c.list_dataset_files(dataset)
+    paths = [root + f for f in files]
+    captions = c.post("/api/caption/getBatch", {"imgPaths": paths, "ext": caption_ext}).get("captions", {})
+    by_file = {f: captions.get(root + f, "") for f in files}
+    missing = sum(1 for v in by_file.values() if not v.strip())
+    shown = dict(list(by_file.items())[: max(1, limit)])
+    return _dump({"dataset": dataset, "files": len(files), "uncaptioned": missing, "captions": shown})
+
+
+@mcp.tool(annotations=WRITE)
+def set_captions(dataset: str, captions: dict[str, str], caption_ext: str = "txt") -> str:
+    """Write captions. `captions` maps a file name (as shown by get_captions) to its caption text;
+    existing captions for those files are replaced."""
+    c = client()
+    root, files = c.list_dataset_files(dataset)
+    known = set(files)
+    unknown = [f for f in captions if f not in known]
+    if unknown:
+        raise AIToolkitError(f"Not in dataset '{dataset}': {', '.join(unknown[:10])}")
+    for f, text in captions.items():
+        c.post("/api/img/caption", {"imgPath": root + f, "caption": text, "ext": caption_ext})
+    return f"Wrote {len(captions)} caption(s) in '{dataset}'."
+
+
+@mcp.tool(annotations=WRITE)
+def auto_caption_dataset(
+    dataset: str,
+    prompt: str | None = None,
+    recaption: bool = False,
+    caption_ext: str = "txt",
+    gpu_ids: str = "0",
+) -> str:
+    """Queue ai-toolkit's built-in captioning job (Qwen3-Omni) for a dataset, like the UI's Caption button.
+
+    Only uncaptioned files are captioned unless `recaption` is set. `prompt` overrides the captioning
+    instruction; by default an image prompt is used for image-only datasets and ai-toolkit's video/audio
+    prompt otherwise. Uses GPU time and downloads the captioner model on first use. Track it with get_job.
+    """
+    c = client()
+    root, files = c.list_dataset_files(dataset)
+    if not files:
+        raise AIToolkitError(f"Dataset '{dataset}' has no files.")
+    cfg = default_caption_job_config()
+    cap = cfg["config"]["process"][0]["caption"]
+    cap["path_to_caption"] = root.rstrip("\\/")
+    cap["recaption"] = recaption
+    cap["caption_extension"] = caption_ext.lstrip(".")
+    if prompt:
+        cap["caption_prompt"] = prompt
+    elif all(f.lower().endswith(IMAGE_EXTS) for f in files):
+        cap["caption_prompt"] = IMAGE_CAPTION_PROMPT
+    try:
+        job = c.post(
+            "/api/jobs",
+            {
+                "name": f"caption_{dataset}_{uuid.uuid4().hex[:6]}",
+                "gpu_ids": gpu_ids,
+                "job_config": cfg,
+                "job_type": "caption",
+                "job_ref": cap["path_to_caption"],
+            },
+        )
+    except AIToolkitError as e:
+        if "409" in str(e):
+            raise AIToolkitError(f"A caption job for '{dataset}' already exists; see list_jobs.") from e
+        raise
+    c.start_job(job)
+    return _dump({"queued": _summary(c.resolve_job(job["id"])), "files": len(files)})
 
 
 # --- jobs -----------------------------------------------------------------------

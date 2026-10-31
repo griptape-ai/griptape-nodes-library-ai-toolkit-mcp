@@ -72,6 +72,9 @@ claude mcp add ai-toolkit -- uvx --from git+https://github.com/shhlife/ai-toolki
 |---|---|
 | `ai_toolkit_status` | Connection check: GPUs, VRAM, queues, active jobs, data folders |
 | `list_datasets` | Dataset folders with full paths and file counts |
+| `create_dataset` | Make a dataset (or add to one) from local files/folders, including existing caption `.txt` files |
+| `get_captions` / `set_captions` | Read and write per-image captions |
+| `auto_caption_dataset` | Queue ai-toolkit's built-in captioner (Qwen3-Omni) on a dataset |
 | `list_jobs` / `get_job` | Jobs with status, step progress, speed, model |
 | `get_job_config` | A job's full config as YAML |
 | `new_job_template` | The UI's default job config to edit |
@@ -86,7 +89,11 @@ claude mcp add ai-toolkit -- uvx --from git+https://github.com/shhlife/ai-toolki
 
 Read-only tools are marked as read-only, so clients with tool approval (Griptape Nodes, Claude) can
 auto-approve them and only ask before anything that creates, starts, or stops a job. Nothing in this server
-deletes jobs or files.
+deletes jobs, datasets, or files (`set_captions` does overwrite the captions you give it).
+
+`create_dataset` uploads through the UI's API rather than writing into ai-toolkit's folder directly, so it
+works the same whether ai-toolkit is on your machine or a remote GPU box. ai-toolkit replaces spaces and
+special characters in uploaded file names with `_`.
 
 ## Tips
 

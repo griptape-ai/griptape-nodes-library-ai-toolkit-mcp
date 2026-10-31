@@ -167,3 +167,23 @@ def test_through_mcp_layer(fake):
             await server.mcp.call_tool("get_job", {"job": "nope"})
 
     anyio.run(run)
+
+
+def test_auto_caption_uses_image_prompt_and_queues(fake):
+    out = yaml.safe_load(server.auto_caption_dataset("faces"))
+    assert out["queued"]["status"] == "queued" and out["files"] == 2
+    job = next(iter(fake.jobs.values()))
+    cap = json.loads(job["job_config"])["config"]["process"][0]["caption"]
+    assert cap["path_to_caption"] == "/tk/datasets/faces"
+    assert cap["caption_prompt"] == server.IMAGE_CAPTION_PROMPT
+    assert "GET /api/queue/0/start" in fake.calls
+
+
+def test_create_dataset_rejects_missing_path(fake):
+    with pytest.raises(AIToolkitError, match="Not found"):
+        server.create_dataset("x", ["/definitely/not/here"])
+
+
+def test_set_captions_rejects_unknown_file(fake):
+    with pytest.raises(AIToolkitError, match="Not in dataset"):
+        server.set_captions("faces", {"zzz.jpg": "hi"})
