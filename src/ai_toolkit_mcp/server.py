@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Literal
 
 import yaml
@@ -340,6 +341,7 @@ def view_samples(job: str, count: int = 4) -> list:
 
 
 def main() -> None:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     mcp.run()
 
 
