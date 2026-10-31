@@ -70,6 +70,7 @@ claude mcp add ai-toolkit -- uvx --from git+https://github.com/shhlife/ai-toolki
 
 | Tool | What it does |
 |---|---|
+| `training_guide` | Best practices by topic: workflow, dataset, captions, models, settings, VRAM, monitoring, troubleshooting |
 | `ai_toolkit_status` | Connection check: GPUs, VRAM, queues, active jobs, data folders |
 | `list_datasets` | Dataset folders with full paths and file counts |
 | `create_dataset` | Make a dataset (or add to one) from local files/folders, including existing caption `.txt` files |
@@ -77,9 +78,10 @@ claude mcp add ai-toolkit -- uvx --from git+https://github.com/shhlife/ai-toolki
 | `auto_caption_dataset` | Queue ai-toolkit's built-in captioner (Qwen3-Omni) on a dataset |
 | `list_jobs` / `get_job` | Jobs with status, step progress, speed, model |
 | `get_job_config` | A job's full config as YAML |
-| `new_job_template` | The UI's default job config to edit |
-| `create_job` | New job from YAML, from the template, or cloned from an existing job, plus dotted-path overrides like `{"train.steps": 2000}` |
-| `update_job` | Edit a stopped job |
+| `list_models` | Every model your ai-toolkit install can train (read live from it), with preset names |
+| `new_job_template` | The default job config, optionally with a model preset applied |
+| `create_job` | New job from a model preset, YAML, or a clone of an existing job, plus dotted-path overrides like `{"train.steps": 2000}`. Returns warnings (missing captions, trigger-word mistakes, gated models without a token) and won't auto-start while there are any |
+| `update_job` | Edit a stopped job, including switching its model preset |
 | `start_job` / `stop_job` | Queue or stop a job (graceful stop saves a checkpoint; `force` kills it) |
 | `trigger` | Ask a running job to save or sample now |
 | `get_job_log` | Tail of the training log, without progress-bar noise |
@@ -95,11 +97,22 @@ deletes jobs, datasets, or files (`set_captions` does overwrite the captions you
 works the same whether ai-toolkit is on your machine or a remote GPU box. ai-toolkit replaces spaces and
 special characters in uploaded file names with `_`.
 
+## How agents learn best practices
+
+- `training_guide` returns practical advice per topic. The tool descriptions tell agents to call it
+  before planning a run, so this works in every MCP client. The text lives in
+  [`guide.py`](src/ai_toolkit_mcp/guide.py); edit it as you learn what works.
+- Model presets come from your ai-toolkit install's own model definitions, the same ones the UI's model
+  dropdown uses, so new models show up automatically when you update ai-toolkit.
+- `create_job` / `update_job` check the config and return warnings in plain language.
+- The server also sends usage instructions when a client connects. Claude Code reads those; Griptape
+  Nodes currently doesn't pass them to its agents, which is why the guide is a tool.
+
 ## Tips
 
-- The most reliable way to train a new model type is to set one job up in the ai-toolkit UI once, then
-  have the agent clone it (`base_job`) with overrides. The UI knows each model's quirks; the agent then
-  only needs to change the dataset, trigger word, steps, and so on.
+- `create_job(model=...)` applies the same settings the UI does when you pick a model. For edit models
+  that need control images (Kontext, Qwen-Image-Edit), set one job up in the UI and have the agent clone
+  it with `base_job`.
 - Per-model reference configs live in ai-toolkit's `config/examples/` folder. You can paste one into
   `create_job(config=...)`.
 

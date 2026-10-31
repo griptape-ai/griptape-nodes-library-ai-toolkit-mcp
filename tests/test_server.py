@@ -11,12 +11,49 @@ from ai_toolkit_mcp import server
 from ai_toolkit_mcp.client import AIToolkitClient, AIToolkitError, clean_log
 
 
+MODEL_ARCHS_JS = """
+const defaultNameOrPath = "";
+exports.default = [
+    {
+        name: "flex1",
+        label: "Flex.1",
+        group: "image",
+        defaults: {
+            "config.process[0].model.name_or_path": ["ostris/Flex.1-alpha", defaultNameOrPath],
+            "config.process[0].train.bypass_guidance_embedding": [true, false]
+        }
+    },
+    {
+        name: "ltx2.5",
+        label: "LTX-2.5",
+        gateUrl: "https://huggingface.co/Lightricks/LTX-2.5",
+        group: "video",
+        isVideoModel: true,
+        defaults: {
+            // [selected, unselected]
+            "config.process[0].model.name_or_path": [
+                "Lightricks/LTX-2.5",
+                defaultNameOrPath
+            ],
+            "config.process[0].model.qtype": ['convrot8', "qfloat8"],
+            "config.process[0].sample.num_frames": [121, 1],
+            "config.process[0].train.audio_loss_multiplier": [1.0, undefined],
+            "config.process[0].datasets[x].do_audio": [true, undefined],
+            "config.process[0].model.weird": [someHelper("x"), 2],
+        },
+        additionalSections: ["model.low_vram", "datasets.num_frames"],
+    },
+];
+"""
+
+
 class FakeToolkit:
     """In-memory stand-in for the ai-toolkit UI API."""
 
     def __init__(self):
         self.jobs: dict[str, dict] = {}
         self.calls: list[str] = []
+        self.uncaptioned = {"0.jpg"}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path, q = request.url.path, request.url.params
@@ -30,7 +67,12 @@ class FakeToolkit:
         if path == "/api/datasets/list":
             return httpx.Response(200, json=["faces"])
         if path == "/api/datasets/listImages":
-            return httpx.Response(200, json={"root": "/tk/datasets/faces/", "images": ["a.jpg", "b.jpg"]})
+            return httpx.Response(200, json={"root": "/tk/datasets/faces/", "images": [f"{i}.jpg" for i in range(12)]})
+        if path == "/api/caption/getBatch":
+            paths = json.loads(request.content)["imgPaths"]
+            return httpx.Response(200, json={"captions": {p: ("" if p.rsplit("/", 1)[-1] in self.uncaptioned else "a photo") for p in paths}})
+        if path == "/api/model_archs":
+            return httpx.Response(200, json={"modules": [{"code": MODEL_ARCHS_JS}], "errors": []})
         if path == "/api/jobs" and request.method == "GET":
             if "id" in q:
                 return httpx.Response(200, content=json.dumps(self.jobs.get(q["id"])).encode())
@@ -85,12 +127,17 @@ def test_status_hides_hf_token(fake):
 
 def test_list_datasets_uses_real_root(fake):
     out = yaml.safe_load(server.list_datasets())
-    assert out == [{"name": "faces", "path": "/tk/datasets/faces", "files": 2}]
+    assert out == [{"name": "faces", "path": "/tk/datasets/faces", "files": 12}]
 
 
 def test_create_from_template_with_overrides_and_start(fake):
+    fake.uncaptioned = set()
     out = yaml.safe_load(
-        server.create_job("me_v1", overrides={"train.steps": 500, "datasets.0.folder_path": "/tk/datasets/faces", "trigger_word": "ohwx"}, start=True)
+        server.create_job(
+            "me_v1",
+            overrides={"train.steps": 500, "datasets.0.folder_path": "/tk/datasets/faces", "trigger_word": "ohwx", "sample.samples": [{"prompt": "[trigger] in snow"}]},
+            start=True,
+        )
     )
     assert out["created"]["status"] == "queued"
     job = next(iter(fake.jobs.values()))
@@ -115,7 +162,8 @@ def test_clone_by_name_and_yaml_body(fake):
 
 
 def test_update_refused_while_queued(fake):
-    server.create_job("run", start=True)
+    server.create_job("run")
+    server.start_job("run")
     with pytest.raises(AIToolkitError, match="stop it"):
         server.update_job("run", overrides={"train.steps": 1})
     server.stop_job("run")
@@ -171,7 +219,7 @@ def test_through_mcp_layer(fake):
 
 def test_auto_caption_uses_image_prompt_and_queues(fake):
     out = yaml.safe_load(server.auto_caption_dataset("faces"))
-    assert out["queued"]["status"] == "queued" and out["files"] == 2
+    assert out["queued"]["status"] == "queued" and out["files"] == 12
     job = next(iter(fake.jobs.values()))
     cap = json.loads(job["job_config"])["config"]["process"][0]["caption"]
     assert cap["path_to_caption"] == "/tk/datasets/faces"
@@ -187,3 +235,67 @@ def test_create_dataset_rejects_missing_path(fake):
 def test_set_captions_rejects_unknown_file(fake):
     with pytest.raises(AIToolkitError, match="Not in dataset"):
         server.set_captions("faces", {"zzz.jpg": "hi"})
+
+
+def test_model_archs_parser_and_preset_switch(fake):
+    from ai_toolkit_mcp.models import UNKNOWN
+
+    archs = server.archs(refresh=True)
+    ltx = archs["ltx2.5"]
+    assert ltx.is_video and ltx.gate_url and ltx.group == "video"
+    assert ltx.defaults["config.process[0].model.qtype"] == ["convrot8", "qfloat8"]
+    assert ltx.defaults["config.process[0].model.weird"][0] is UNKNOWN
+
+    server.create_job("vid", model="ltx2.5", overrides={"datasets.0.folder_path": "/tk/datasets/faces", "trigger_word": "zk7"})
+    proc = yaml.safe_load(server.get_job_config("vid"))["config"]["process"][0]
+    assert proc["model"]["arch"] == "ltx2.5"
+    assert proc["model"]["name_or_path"] == "Lightricks/LTX-2.5"
+    assert proc["model"]["qtype"] == "convrot8"
+    assert proc["sample"]["num_frames"] == 121
+    assert proc["datasets"][0]["do_audio"] is True
+    assert "weird" not in proc["model"]
+    assert "bypass_guidance_embedding" in proc["train"] and proc["train"]["bypass_guidance_embedding"] is False
+
+    server.update_job("vid", model="flex1")
+    proc = yaml.safe_load(server.get_job_config("vid"))["config"]["process"][0]
+    assert proc["model"]["name_or_path"] == "ostris/Flex.1-alpha"
+    assert "audio_loss_multiplier" not in proc["train"]
+    assert "do_audio" not in proc["datasets"][0]
+    assert proc["sample"]["num_frames"] == 1
+
+
+def test_unknown_model(fake):
+    with pytest.raises(AIToolkitError, match="list_models"):
+        server.create_job("x", model="nope")
+
+
+def test_list_models_and_guide(fake):
+    models = yaml.safe_load(server.list_models(group="video"))
+    assert models == [{"name": "ltx2.5", "label": "LTX-2.5", "group": "video", "base": "Lightricks/LTX-2.5", "gate_url": "https://huggingface.co/Lightricks/LTX-2.5"}]
+    assert "trigger" in server.training_guide("captions")
+    assert "Topics:" in server.training_guide()
+
+
+def test_warnings_block_autostart(fake):
+    out = yaml.safe_load(server.create_job("w", start=True))
+    assert out["started"] is False and "folder_path isn't set" in out["warnings"][0]
+
+    out = yaml.safe_load(
+        server.create_job(
+            "w2",
+            overrides={"datasets.0.folder_path": "/tk/datasets/faces", "trigger_word": "zk7", "train.cache_text_embeddings": True},
+        )
+    )
+    text = " ".join(out["warnings"])
+    assert "1 of 12 files" in text
+    assert "cache_text_embeddings" in text
+    assert "No sample prompt contains the trigger word" in text
+
+    out = yaml.safe_load(
+        server.create_job(
+            "ok",
+            start=True,
+            overrides={"datasets.0.folder_path": "/tk/datasets/faces", "trigger_word": "zk7", "sample.samples": [{"prompt": "[trigger] at sea"}]},
+        )
+    )
+    assert out["warnings"] == ["1 of 12 files in 'faces' have no caption."]

@@ -8,6 +8,8 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp_types import ToolAnnotations
 
 from .client import AIToolkitClient, AIToolkitError, clean_log, parse_config
+from .guide import GUIDE, TOPICS
+from .models import ModelArch, apply_model, parse_model_archs
 from .template import default_caption_job_config, default_job_config
 
 mcp = MCPServer(
@@ -15,11 +17,11 @@ mcp = MCPServer(
     instructions=(
         "Drives LoRA / fine-tune training in ostris ai-toolkit through its web UI's API. "
         "Jobs created here appear in the ai-toolkit UI and run through its per-GPU queue. "
-        "Typical flow: ai_toolkit_status -> list_datasets (or create_dataset from local files, then get_captions / "
-        "set_captions or auto_caption_dataset) -> create_job (from new_job_template or "
-        "an existing job via base_job) -> start_job -> poll get_job / get_job_log / get_loss -> view_samples. "
-        "Prefer cloning a previous job with base_job + overrides: its model block is already known to work "
-        "on this machine. Ask before starting or stopping training; runs can take hours of GPU time."
+        "Call training_guide before planning a training run; it covers datasets, captions, settings, and VRAM. "
+        "Typical flow: ai_toolkit_status -> create_dataset / list_datasets -> get_captions + set_captions or "
+        "auto_caption_dataset -> list_models -> create_job(model=...) -> start_job -> get_job / get_job_log -> "
+        "view_samples. Read the warnings create_job returns. Ask before starting or stopping training; runs can "
+        "take hours of GPU time."
     ),
 )
 
@@ -82,9 +84,24 @@ def _parse_config_text(text: str) -> dict:
     return data
 
 
-def _finalize(name: str, cfg: dict, overrides: dict | None) -> dict:
+_archs: dict[str, ModelArch] = {}
+
+
+def archs(refresh: bool = False) -> dict[str, ModelArch]:
+    global _archs
+    if refresh or not _archs:
+        _archs = parse_model_archs(client().get("/api/model_archs"))
+    return _archs
+
+
+def _finalize(name: str, cfg: dict, overrides: dict | None, model: str | None = None) -> dict:
     cfg["config"]["name"] = name
     proc = cfg["config"]["process"][0]
+    if model:
+        known = archs() if model in archs() else archs(refresh=True)
+        if model not in known:
+            raise AIToolkitError(f"Unknown model '{model}'. Use list_models to see the names this install supports.")
+        apply_model(proc, known, model)
     for path, value in (overrides or {}).items():
         _set_path(proc, path, value)
     settings = client().get("/api/settings")
@@ -92,6 +109,69 @@ def _finalize(name: str, cfg: dict, overrides: dict | None) -> dict:
     proc.setdefault("device", "cuda")
     proc.setdefault("logging", {"log_every": 1, "use_ui_logger": True})
     return cfg
+
+
+def _norm(p: str) -> str:
+    return p.replace("\\", "/").rstrip("/").lower()
+
+
+def _review(cfg: dict) -> list[str]:
+    """Plain-language warnings about a job config, returned to the agent with create/update results."""
+    c = client()
+    proc = cfg["config"]["process"][0]
+    settings = c.get("/api/settings")
+    warnings: list[str] = []
+    trigger = proc.get("trigger_word")
+    train = proc.get("train") or {}
+
+    ds_root = _norm(settings.get("DATASETS_FOLDER", ""))
+    for n, ds in enumerate(proc.get("datasets") or []):
+        folder = ds.get("folder_path") or ""
+        if not folder or folder == "/path/to/images/folder":
+            warnings.append(f"datasets.{n}.folder_path isn't set. Use a `path` from list_datasets.")
+            continue
+        rel = _norm(folder)[len(ds_root) + 1 :] if ds_root and _norm(folder).startswith(ds_root + "/") else None
+        if not rel or "/" in rel:
+            continue
+        try:
+            root, files = c.list_dataset_files(rel)
+        except AIToolkitError:
+            warnings.append(f"datasets.{n}.folder_path '{folder}' doesn't exist.")
+            continue
+        if not files:
+            warnings.append(f"Dataset '{rel}' is empty.")
+            continue
+        if len(files) < 5:
+            warnings.append(f"Dataset '{rel}' has only {len(files)} files; 10+ usually trains far better.")
+        caps = c.post("/api/caption/getBatch", {"imgPaths": [root + f for f in files], "ext": ds.get("caption_ext") or "txt"})
+        missing = sum(1 for v in caps.get("captions", {}).values() if not v.strip())
+        if missing and not (trigger or ds.get("default_caption")):
+            warnings.append(
+                f"{missing} of {len(files)} files in '{rel}' have no caption and there's no trigger_word or "
+                "default_caption, so they train with an empty prompt. Caption them or set trigger_word."
+            )
+        elif missing:
+            warnings.append(f"{missing} of {len(files)} files in '{rel}' have no caption.")
+
+    if trigger and train.get("cache_text_embeddings"):
+        warnings.append(
+            "trigger_word is set but train.cache_text_embeddings is true, and ai-toolkit ignores trigger words "
+            "when caching text embeddings. Set train.cache_text_embeddings false (use train.unload_text_encoder "
+            "true to save VRAM instead) or drop the trigger word."
+        )
+    prompts = [s.get("prompt", "") for s in (proc.get("sample") or {}).get("samples", []) if isinstance(s, dict)]
+    if trigger and prompts and not any(trigger in p or "[trigger]" in p for p in prompts):
+        warnings.append("No sample prompt contains the trigger word or [trigger], so samples won't show the LoRA's effect.")
+
+    arch = archs().get((proc.get("model") or {}).get("arch", ""))
+    if arch and arch.gate_url and not settings.get("HF_TOKEN"):
+        warnings.append(
+            f"{arch.label} is gated: accept its license at {arch.gate_url} and save an HF token in the ai-toolkit "
+            "UI's Settings, or the job fails while downloading."
+        )
+    if arch and arch.group == "instruction":
+        warnings.append(f"{arch.label} is an edit model that needs control images; check the dataset controls in the UI.")
+    return warnings
 
 
 # --- overview -----------------------------------------------------------------
@@ -298,32 +378,67 @@ def get_job_config(job: str) -> str:
 
 
 @mcp.tool(annotations=READ)
-def new_job_template() -> str:
-    """The ai-toolkit UI's default job config (Flex.1 LoRA) as YAML, to edit and pass to create_job.
+def training_guide(topic: Literal[TOPICS] = "overview") -> str:  # type: ignore[valid-type]
+    """Best practices for training LoRAs with ai-toolkit. Call this before planning a first training run.
 
-    For other models, cloning a previous job with create_job(base_job=...) is more reliable,
-    or see ai-toolkit's config/examples/*.yaml for per-model settings.
+    Topics: overview (workflow + rules), dataset, captions (incl. trigger words), models, settings
+    (steps, lr, rank, sampling), vram, monitoring (judging samples, overfitting), troubleshooting.
     """
-    return _dump(default_job_config())
+    return GUIDE[topic]
+
+
+@mcp.tool(annotations=READ)
+def list_models(group: str | None = None) -> str:
+    """Models this ai-toolkit install can train, with their preset name for create_job(model=...).
+
+    `group` filters by image, video, instruction (edit models), audio, llm, or experimental.
+    `gate_url` means the model needs its Hugging Face license accepted plus an HF token in ai-toolkit.
+    """
+    out = [
+        {
+            "name": a.name,
+            "label": a.label,
+            "group": a.group,
+            "base": next((s for k, (s, _) in a.defaults.items() if k.endswith("model.name_or_path") and isinstance(s, str)), None),
+            **({"gate_url": a.gate_url} if a.gate_url else {}),
+        }
+        for a in archs(refresh=True).values()
+        if not group or a.group == group
+    ]
+    return _dump(out) if out else f"No models in group '{group}'."
+
+
+@mcp.tool(annotations=READ)
+def new_job_template(model: str | None = None) -> str:
+    """The default job config as YAML, optionally with a model preset applied (see list_models).
+    Usually simpler to call create_job(model=..., overrides=...) directly."""
+    cfg = default_job_config()
+    if model:
+        if model not in archs(refresh=True):
+            raise AIToolkitError(f"Unknown model '{model}'. Use list_models.")
+        apply_model(cfg["config"]["process"][0], archs(), model)
+    return _dump(cfg)
 
 
 @mcp.tool(annotations=WRITE)
 def create_job(
     name: str,
+    model: str | None = None,
     config: str | None = None,
     base_job: str | None = None,
     overrides: dict[str, Any] | None = None,
     gpu_ids: str = "0",
     start: bool = False,
 ) -> str:
-    """Create a training job in the ai-toolkit UI.
+    """Create a training job in the ai-toolkit UI. Returns warnings about likely problems; read them.
 
-    Config source (pick one): `config` as YAML/JSON text (full job file or just its `config:` body),
-    or `base_job` (id/name) to clone an existing job's config. Neither = the default template.
-    `overrides` sets values inside config.process[0] by dotted path, e.g.
-    {"train.steps": 4000, "datasets.0.folder_path": "D:/datasets/me", "trigger_word": "ohwx",
-     "network.linear": 16, "sample.samples": [{"prompt": "ohwx at the beach"}]}.
-    `gpu_ids` is the GPU index (e.g. "0" or "0,1"). Set `start` to queue it immediately.
+    Config source: the default template, `config` as YAML/JSON text (full job file or its `config:` body),
+    or `base_job` (id/name) to clone an existing job (most reliable for a model trained before).
+    `model` applies that model's preset from list_models, like picking it in the UI.
+    `overrides` then sets values inside config.process[0] by dotted path, e.g.
+    {"train.steps": 2500, "datasets.0.folder_path": "<path from list_datasets>", "trigger_word": "rufus_dog",
+     "network.linear": 16, "sample.samples": [{"prompt": "[trigger] on a beach"}]}.
+    `gpu_ids` is the GPU index ("0", "0,1"). `start` queues it right away, but only if there are no warnings.
     """
     c = client()
     if config and base_job:
@@ -334,34 +449,42 @@ def create_job(
         cfg = parse_config(c.resolve_job(base_job))
     else:
         cfg = default_job_config()
-    job = c.save_job(name, _finalize(name, cfg, overrides), gpu_ids)
-    if start:
+    cfg = _finalize(name, cfg, overrides, model)
+    warnings = _review(cfg)
+    job = c.save_job(name, cfg, gpu_ids)
+    started = start and not warnings
+    if started:
         c.start_job(job)
         job = c.resolve_job(job["id"])
-    return _dump({"created": _summary(job), "started": start})
+    result: dict[str, Any] = {"created": _summary(job), "started": started}
+    if warnings:
+        result["warnings"] = warnings
+        if start:
+            result["note"] = "Not started because of the warnings. Fix them with update_job, or start_job to run anyway."
+    return _dump(result)
 
 
 @mcp.tool(annotations=WRITE)
 def update_job(
     job: str,
+    model: str | None = None,
     config: str | None = None,
     overrides: dict[str, Any] | None = None,
     gpu_ids: str | None = None,
 ) -> str:
-    """Edit a job that isn't running: replace its config (YAML/JSON) and/or apply dotted-path `overrides`
-    inside config.process[0] (same format as create_job)."""
+    """Edit a job that isn't running: switch `model` preset, replace its config (YAML/JSON), and/or apply
+    dotted-path `overrides` inside config.process[0] (same format as create_job). Returns warnings."""
     c = client()
     existing = c.resolve_job(job)
     if existing["status"] in ("running", "stopping", "queued"):
         raise AIToolkitError(f"Job '{existing['name']}' is {existing['status']}; stop it before editing.")
     cfg = _parse_config_text(config) if config else parse_config(existing)
-    saved = c.save_job(
-        existing["name"],
-        _finalize(existing["name"], cfg, overrides),
-        gpu_ids or existing["gpu_ids"],
-        job_id=existing["id"],
-    )
-    return _dump({"updated": _summary(saved)})
+    cfg = _finalize(existing["name"], cfg, overrides, model)
+    saved = c.save_job(existing["name"], cfg, gpu_ids or existing["gpu_ids"], job_id=existing["id"])
+    result: dict[str, Any] = {"updated": _summary(saved)}
+    if warnings := _review(cfg):
+        result["warnings"] = warnings
+    return _dump(result)
 
 
 @mcp.tool(annotations=WRITE)
