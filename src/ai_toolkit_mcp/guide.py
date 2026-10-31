@@ -10,7 +10,8 @@ GUIDE: dict[str, str] = {
 
 1. Check the machine: ai_toolkit_status (GPU VRAM, other jobs on the queue, whether an HF token is set).
 2. Dataset: create_dataset from a folder of images (or clips). See topic "dataset".
-3. Captions: get_captions to inspect, then set_captions or auto_caption_dataset. See topic "captions".
+3. Captions: get_captions to inspect, then auto_caption_dataset, a Griptape Nodes captioning workflow
+   (topic "griptape_captioning"), or set_captions by hand. See topic "captions".
 4. Model: list_models, then pick one that fits the goal and the GPU. See topics "models" and "vram".
 5. Settings: create_job(model=..., overrides={...}). See topic "settings". Read the warnings it returns.
 6. Confirm with the user, then start_job. Training takes minutes to hours.
@@ -24,7 +25,8 @@ Rules of thumb:
 - To train a model you haven't trained before, a job set up once in the ai-toolkit UI and cloned with
   create_job(base_job=...) is the most reliable path. The model presets get close but the UI knows
   every model's quirks.
-- Topics: overview, dataset, captions, models, settings, vram, monitoring, troubleshooting.
+- Topics: overview, dataset, captions, griptape_captioning, models, settings, vram, monitoring,
+  troubleshooting.
 """,
     "dataset": """\
 # Building a dataset
@@ -85,6 +87,48 @@ Writing captions (or reviewing auto-captions):
   SD1.5/SDXL anime-style models.
 - auto_caption_dataset gives a solid first draft. Spot-check a few with get_captions and fix any that
   are wrong or that over-describe the subject.
+- Alternative: caption with a Griptape Nodes workflow and any vision model you choose, then write the
+  results with set_captions. Gives full control over the prompt. See topic "griptape_captioning".
+""",
+    "griptape_captioning": """\
+# Captioning with a Griptape Nodes workflow (instead of ai-toolkit's built-in captioner)
+
+Useful when the user wants a specific vision model or tight control over the caption prompt. If you
+have Griptape Nodes tools available you can build this flow for them; otherwise walk them through it.
+
+Workflow:
+1. List Files node: set to "List files only" and recursive, pointed at the image folder. Point it at
+   the ai-toolkit dataset folder (the `path` from list_datasets) rather than the original folder, so
+   file names match what set_captions expects (ai-toolkit replaces spaces/special characters in
+   uploaded names with "_").
+2. ForEach Group: pass List Files' file_paths to the group's items.
+3. Inside the group:
+   - Describe Image node: current_item as the image, with a caption prompt (examples below).
+   - FilePath Components node: current_item as the path, to get the filename.
+   - Key Value Pair node: filename as the key, Describe Image's output as the value. Pass its
+     dictionary to the group's new_item_to_add.
+4. Display Text node on the group's results to review all the captions.
+5. Merge the results into one {filename: caption} map and write them with set_captions(dataset, ...).
+   Check the keys against get_captions; any that don't match a dataset file are rejected.
+
+Caption prompts:
+- Style LoRA (teach the look, keep content promptable):
+  "Write a training caption describing only what is depicted: subject, view, pose, expression, hair,
+  clothing, props, colors. One comma-separated line under 40 words. Do not describe art style, line,
+  shading, or medium."
+- Subject LoRA (a person, character, pet, object):
+  "Write a training caption describing the setting, pose, clothing, expression, lighting, and camera
+  angle. One line under 40 words. Do not describe the subject's permanent physical features."
+
+Trigger words and prefixes:
+- ai-toolkit adds trigger_word to any caption missing it, so prefixing captions is optional. Prefix
+  yourself when you want a fixed structure, e.g. for a style set with several recurring characters:
+  "<trigger>, <character name>, <caption>". Then <character name> becomes promptable too.
+
+Example (style LoRA): caption with the style prompt, prefix each caption "jahd, <character>, ", write
+with set_captions, then create_job(name=..., model=..., overrides={"trigger_word": "jahd",
+"train.content_or_style": "style", "train.steps": 2000, "datasets.0.folder_path": <dataset path>,
+"sample.samples": [{"prompt": "[trigger], ..."}]}).
 """,
     "models": """\
 # Choosing a model

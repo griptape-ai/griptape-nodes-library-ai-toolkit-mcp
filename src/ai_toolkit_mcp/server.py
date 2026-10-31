@@ -381,7 +381,8 @@ def get_job_config(job: str) -> str:
 def training_guide(topic: Literal[TOPICS] = "overview") -> str:  # type: ignore[valid-type]
     """Best practices for training LoRAs with ai-toolkit. Call this before planning a first training run.
 
-    Topics: overview (workflow + rules), dataset, captions (incl. trigger words), models, settings
+    Topics: overview (workflow + rules), dataset, captions (incl. trigger words), griptape_captioning
+    (caption with a Griptape Nodes workflow and any vision model instead of the built-in captioner), models, settings
     (steps, lr, rank, sampling), vram, monitoring (judging samples, overfitting), troubleshooting.
     """
     return GUIDE[topic]
