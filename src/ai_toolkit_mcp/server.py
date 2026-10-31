@@ -32,6 +32,32 @@ READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 
 
+def _tool(annotations: ToolAnnotations):
+    # Plain-text results only: structured output would send every result twice.
+    return mcp.tool(annotations=annotations, structured_output=False)
+
+
+def _compact_schema(schema: Any) -> None:
+    """Drop pydantic's per-field titles and collapse Optional anyOf-null unions to cut tokens."""
+    if isinstance(schema, list):
+        for item in schema:
+            _compact_schema(item)
+        return
+    if not isinstance(schema, dict):
+        return
+    schema.pop("title", None)
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and len(any_of) == 2 and {"type": "null"} in any_of:
+        schema.pop("anyOf")
+        schema.update(next(s for s in any_of if s != {"type": "null"}))
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, dict):
+            for prop in value.values():
+                _compact_schema(prop)
+        elif isinstance(value, (dict, list)):
+            _compact_schema(value)
+
+
 def client() -> AIToolkitClient:
     global _client
     if _client is None:
@@ -187,9 +213,9 @@ def _review(cfg: dict) -> list[str]:
 # --- overview -----------------------------------------------------------------
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def ai_toolkit_status() -> str:
-    """Connection check and machine overview: GPUs (VRAM, load), queues, active jobs, and data folders."""
+    """Connection check: GPUs, queues, active jobs, data folders, HF cache."""
     c = client()
     settings = c.get("/api/settings")
     gpu = c.get("/api/gpu")
@@ -219,12 +245,9 @@ def ai_toolkit_status() -> str:
     )
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def list_datasets() -> str:
-    """List dataset folders in ai-toolkit's datasets folder, with full paths and file counts.
-
-    Use the `path` value as `datasets.0.folder_path` when creating a job.
-    """
+    """Datasets with file counts and paths (use as datasets.0.folder_path)."""
     c = client()
     root = c.get("/api/settings").get("DATASETS_FOLDER", "")
     sep = "\\" if "\\" in root else "/"
@@ -266,14 +289,9 @@ def _collect_files(paths: list[str], caption_ext: str) -> list[str]:
     return found
 
 
-@mcp.tool(annotations=WRITE)
+@_tool(WRITE)
 def create_dataset(name: str, paths: list[str], caption_ext: str = "txt") -> str:
-    """Create a dataset (or add to an existing one) by uploading local files into ai-toolkit.
-
-    `paths` are files or folders on the machine running this MCP server; folders are searched recursively
-    for images, videos, audio, and matching caption files (e.g. photo1.jpg + photo1.txt). Files are sent
-    over the UI's API, so this also works when ai-toolkit runs on another machine.
-    """
+    """Create or add to a dataset by uploading local files/folders (recursive: media plus matching caption files)."""
     c = client()
     files = _collect_files(paths, caption_ext.lstrip("."))
     if not files:
@@ -293,9 +311,9 @@ def create_dataset(name: str, paths: list[str], caption_ext: str = "txt") -> str
     )
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def get_captions(dataset: str, caption_ext: str = "txt", limit: int = 200) -> str:
-    """Captions for each file in a dataset (empty string = uncaptioned), plus a count of missing ones."""
+    """Each dataset file's caption ('' = missing)."""
     c = client()
     root, files = c.list_dataset_files(dataset)
     paths = [root + f for f in files]
@@ -306,10 +324,9 @@ def get_captions(dataset: str, caption_ext: str = "txt", limit: int = 200) -> st
     return _dump({"dataset": dataset, "files": len(files), "uncaptioned": missing, "captions": shown})
 
 
-@mcp.tool(annotations=WRITE)
+@_tool(WRITE)
 def set_captions(dataset: str, captions: dict[str, str], caption_ext: str = "txt") -> str:
-    """Write captions. `captions` maps a file name (as shown by get_captions) to its caption text;
-    existing captions for those files are replaced."""
+    """Write captions as {filename from get_captions: caption}. Replaces existing ones."""
     c = client()
     root, files = c.list_dataset_files(dataset)
     known = set(files)
@@ -321,7 +338,7 @@ def set_captions(dataset: str, captions: dict[str, str], caption_ext: str = "txt
     return f"Wrote {len(captions)} caption(s) in '{dataset}'."
 
 
-@mcp.tool(annotations=WRITE)
+@_tool(WRITE)
 def auto_caption_dataset(
     dataset: str,
     prompt: str | None = None,
@@ -329,12 +346,7 @@ def auto_caption_dataset(
     caption_ext: str = "txt",
     gpu_ids: str = "0",
 ) -> str:
-    """Queue ai-toolkit's built-in captioning job (Qwen3-Omni) for a dataset, like the UI's Caption button.
-
-    Only uncaptioned files are captioned unless `recaption` is set. `prompt` overrides the captioning
-    instruction; by default an image prompt is used for image-only datasets and ai-toolkit's video/audio
-    prompt otherwise. Uses GPU time and downloads the captioner model on first use. Track it with get_job.
-    """
+    """Queue ai-toolkit's built-in captioner on a dataset (uncaptioned files unless recaption). Uses the GPU; track with get_job."""
     c = client()
     root, files = c.list_dataset_files(dataset)
     if not files:
@@ -370,43 +382,34 @@ def auto_caption_dataset(
 # --- jobs -----------------------------------------------------------------------
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def list_jobs(active_only: bool = False) -> str:
-    """List training jobs (newest first) with status, progress, and model."""
+    """Jobs, newest first, with status and progress."""
     jobs = client().list_jobs(active_only=active_only)
     return _dump([_summary(j) for j in jobs]) if jobs else "No jobs."
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def get_job(job: str) -> str:
-    """Status and progress of one job. `job` is a job id or name."""
+    """One job's status and progress. job = id or name."""
     return _dump(_summary(client().resolve_job(job)))
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def get_job_config(job: str) -> str:
-    """Full training config of a job as YAML. Useful as a starting point for a new run."""
+    """A job's full config as YAML."""
     return _dump(parse_config(client().resolve_job(job)))
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def training_guide(topic: Literal[TOPICS] = "overview") -> str:  # type: ignore[valid-type]
-    """Best practices for training LoRAs with ai-toolkit. Call this before planning a first training run.
-
-    Topics: overview (workflow + rules), dataset, captions (incl. trigger words), griptape_captioning
-    (caption with a Griptape Nodes workflow and any vision model instead of the built-in captioner), models, settings
-    (steps, lr, rank, sampling), vram, monitoring (judging samples, overfitting), troubleshooting.
-    """
+    """Best practices by topic. Read before planning a first training run."""
     return GUIDE[topic]
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def list_models(group: str | None = None) -> str:
-    """Models this ai-toolkit install can train, with their preset name for create_job(model=...).
-
-    `group` filters by image, video, instruction (edit models), audio, llm, or experimental.
-    `gate_url` means the model needs its Hugging Face license accepted plus an HF token in ai-toolkit.
-    """
+    """Trainable models; pass name to create_job(model=...). gate_url = needs HF license + token."""
     out = [
         {
             "name": a.name,
@@ -421,19 +424,7 @@ def list_models(group: str | None = None) -> str:
     return _dump(out) if out else f"No models in group '{group}'."
 
 
-@mcp.tool(annotations=READ)
-def new_job_template(model: str | None = None) -> str:
-    """The default job config as YAML, optionally with a model preset applied (see list_models).
-    Usually simpler to call create_job(model=..., overrides=...) directly."""
-    cfg = default_job_config()
-    if model:
-        if model not in archs(refresh=True):
-            raise AIToolkitError(f"Unknown model '{model}'. Use list_models.")
-        apply_model(cfg["config"]["process"][0], archs(), model)
-    return _dump(cfg)
-
-
-@mcp.tool(annotations=WRITE)
+@_tool(WRITE)
 def create_job(
     name: str,
     model: str | None = None,
@@ -443,16 +434,7 @@ def create_job(
     gpu_ids: str = "0",
     start: bool = False,
 ) -> str:
-    """Create a training job in the ai-toolkit UI. Returns warnings about likely problems; read them.
-
-    Config source: the default template, `config` as YAML/JSON text (full job file or its `config:` body),
-    or `base_job` (id/name) to clone an existing job (most reliable for a model trained before).
-    `model` applies that model's preset from list_models, like picking it in the UI.
-    `overrides` then sets values inside config.process[0] by dotted path, e.g.
-    {"train.steps": 2500, "datasets.0.folder_path": "<path from list_datasets>", "trigger_word": "rufus_dog",
-     "network.linear": 16, "sample.samples": [{"prompt": "[trigger] on a beach"}]}.
-    `gpu_ids` is the GPU index ("0", "0,1"). `start` queues it right away, but only if there are no warnings.
-    """
+    """Create a training job from the default template, `config` YAML, or a `base_job` clone. `model` applies a list_models preset. `overrides` sets dotted paths in config.process[0], e.g. {"train.steps": 2500, "datasets.0.folder_path": "...", "trigger_word": "zk7", "sample.samples": [{"prompt": "[trigger] ..."}]}. Returns warnings; `start` only queues if there are none."""
     c = client()
     if config and base_job:
         raise AIToolkitError("Pass either config or base_job, not both.")
@@ -479,7 +461,7 @@ def create_job(
     return _dump(result)
 
 
-@mcp.tool(annotations=WRITE)
+@_tool(WRITE)
 def update_job(
     job: str,
     model: str | None = None,
@@ -487,8 +469,7 @@ def update_job(
     overrides: dict[str, Any] | None = None,
     gpu_ids: str | None = None,
 ) -> str:
-    """Edit a job that isn't running: switch `model` preset, replace its config (YAML/JSON), and/or apply
-    dotted-path `overrides` inside config.process[0] (same format as create_job). Returns warnings."""
+    """Edit a stopped job (model / config / overrides as in create_job). Returns warnings."""
     c = client()
     existing = c.resolve_job(job)
     if existing["status"] in ("running", "stopping", "queued"):
@@ -504,10 +485,9 @@ def update_job(
     return _dump(result)
 
 
-@mcp.tool(annotations=WRITE)
+@_tool(WRITE)
 def start_job(job: str) -> str:
-    """Queue a job and start its GPU queue. Resumes from the last checkpoint if one exists.
-    Also reports model weights that aren't in the local Hugging Face cache and will be downloaded."""
+    """Queue a job; resumes from its last checkpoint. Reports models that will be downloaded. Ask the user first."""
     c = client()
     j = c.resolve_job(job)
     c.start_job(j)
@@ -520,19 +500,18 @@ def start_job(job: str) -> str:
     return _dump(result)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False))
+@_tool(ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False))
 def stop_job(job: str, force: bool = False) -> str:
-    """Stop a job gracefully (saves a checkpoint first). `force` kills the process immediately,
-    only for jobs stuck and ignoring a normal stop."""
+    """Stop a job gracefully (saves a checkpoint). force=True kills a hung job."""
     c = client()
     j = c.resolve_job(job)
     c.get(f"/api/jobs/{j['id']}/{'kill' if force else 'stop'}")
     return _dump(_summary(c.resolve_job(j["id"])))
 
 
-@mcp.tool(annotations=WRITE)
+@_tool(WRITE)
 def trigger(job: str, action: Literal["save", "sample"]) -> str:
-    """Ask a running job to save a checkpoint or generate samples on its next step."""
+    """Make a running job save or sample on its next step."""
     c = client()
     j = c.resolve_job(job)
     c.get(f"/api/jobs/{j['id']}/{action}_now")
@@ -542,18 +521,18 @@ def trigger(job: str, action: Literal["save", "sample"]) -> str:
 # --- monitoring ------------------------------------------------------------------
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def get_job_log(job: str, tail_lines: int = 60) -> str:
-    """Last lines of a job's training log, with progress-bar noise collapsed."""
+    """Tail of a job's log."""
     c = client()
     j = c.resolve_job(job)
     log = c.get(f"/api/jobs/{j['id']}/log").get("log", "")
     return clean_log(log, max(1, tail_lines)) or "Log is empty (job may not have started yet)."
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def get_loss(job: str, key: str = "loss", max_points: int = 30) -> str:
-    """Loss curve summary: first/last/min values, a smoothed trend, and evenly spaced points."""
+    """Loss summary and smoothed curve."""
     c = client()
     j = c.resolve_job(job)
     data = c.get(f"/api/jobs/{j['id']}/loss", key=key, limit=20000)
@@ -579,9 +558,9 @@ def get_loss(job: str, key: str = "loss", max_points: int = 30) -> str:
     )
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def list_job_outputs(job: str) -> str:
-    """Checkpoint (.safetensors) files and sample media produced by a job, as local paths."""
+    """A job's checkpoint and sample file paths."""
     c = client()
     j = c.resolve_job(job)
     files = c.get(f"/api/jobs/{j['id']}/files").get("files", [])
@@ -594,9 +573,9 @@ def list_job_outputs(job: str) -> str:
     )
 
 
-@mcp.tool(annotations=READ)
+@_tool(READ)
 def view_samples(job: str, count: int = 4) -> list:
-    """Return the most recent sample images from a job so you can judge training progress visually."""
+    """A job's latest sample images, to judge progress."""
     c = client()
     j = c.resolve_job(job)
     samples = [
@@ -614,6 +593,10 @@ def view_samples(job: str, count: int = 4) -> list:
         out.append(path)
         out.append(Image(data=c.image_bytes(path), format="jpeg" if ext == "jpg" else ext))
     return out
+
+
+for _registered in mcp._tool_manager.list_tools():
+    _compact_schema(_registered.parameters)
 
 
 def main() -> None:

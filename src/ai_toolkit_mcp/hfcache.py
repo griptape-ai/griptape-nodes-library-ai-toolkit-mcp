@@ -112,13 +112,17 @@ def download_warnings(proc: dict, cache: Path) -> list[str]:
         missing = [rel.rsplit("/", 1)[-1] for comp, rel in split[1].items() if not kwargs.get(f"{comp}_path")]
         if missing:
             return [
-                f"Not in the Hugging Face cache ({cache}): {', '.join(missing)}. ai-toolkit will download them "
-                "into its own models folder on first run (often tens of GB)."
+                (
+                    f"Not in the Hugging Face cache ({cache}): {', '.join(missing)}. ai-toolkit will download them "
+                    "into its own models folder on first run (often tens of GB)."
+                )
             ]
         return []
     if REPO_ID.match(name) and not os.path.exists(name):
         return [
-            f"{name} isn't fully in the Hugging Face cache ({cache}), so ai-toolkit will download it on first run "
-            "(often tens of GB; many models go to ai-toolkit's own models folder rather than the HF cache)."
+            (
+                f"{name} isn't fully in the Hugging Face cache ({cache}), so ai-toolkit will download it on first run "
+                "(often tens of GB; many models go to ai-toolkit's own models folder rather than the HF cache)."
+            )
         ]
     return []

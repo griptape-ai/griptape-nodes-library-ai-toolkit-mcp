@@ -79,7 +79,6 @@ claude mcp add ai-toolkit -- uvx --from git+https://github.com/shhlife/ai-toolki
 | `list_jobs` / `get_job` | Jobs with status, step progress, speed, model |
 | `get_job_config` | A job's full config as YAML |
 | `list_models` | Every model your ai-toolkit install can train (read live from it), with preset names |
-| `new_job_template` | The default job config, optionally with a model preset applied |
 | `create_job` | New job from a model preset, YAML, or a clone of an existing job, plus dotted-path overrides like `{"train.steps": 2000}`. Returns warnings (missing captions, trigger-word mistakes, gated models without a token) and won't auto-start while there are any |
 | `update_job` | Edit a stopped job, including switching its model preset |
 | `start_job` / `stop_job` | Queue or stop a job (graceful stop saves a checkpoint; `force` kills it) |
