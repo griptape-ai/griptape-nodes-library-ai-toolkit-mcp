@@ -134,3 +134,15 @@ uv run mcp dev src/ai_toolkit_mcp/server.py   # MCP Inspector
 ## License
 
 MIT
+
+## Griptape Nodes library (experimental)
+
+The `griptape_library/` folder is a Griptape Nodes library that exposes a subset of the tools (status, datasets,
+models, jobs, job logs, start and stop) through the engine's own MCP server. It needs an engine that supports
+`AdvancedNodeLibrary.get_mcp_tools` ([griptape-nodes-engine#6035](https://github.com/griptape-ai/griptape-nodes-engine/pull/6035)).
+
+1. In Griptape Nodes, add `griptape_library/griptape_nodes_library.json` from a checkout of this repo as a library.
+2. Add an MCP server pointing at `http://localhost:8125/mcp/libraries/ai_toolkit/` (or use
+   `http://localhost:8125/mcp/?libraries=ai_toolkit` for the engine's tools plus these).
+
+The handlers call the same functions as the standalone server, so results match.
