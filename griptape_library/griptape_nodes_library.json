@@ -1,0 +1,26 @@
+{
+  "name": "AI Toolkit",
+  "library_schema_version": "0.10.0",
+  "advanced_library_path": "ai_toolkit_library.py",
+  "metadata": {
+    "author": "Jason Schleifer",
+    "description": "Set up, launch, and monitor LoRA training runs in ostris/ai-toolkit. Gives agents tools for ai-toolkit's web UI API.",
+    "library_version": "0.1.0",
+    "engine_version": "0.97.0",
+    "tags": ["ai-toolkit", "training", "lora"],
+    "dependencies": {
+      "pip_dependencies": ["httpx>=0.27", "pyyaml>=6", "mcp>=2.3,<3"]
+    }
+  },
+  "categories": [
+    {
+      "training": {
+        "color": "border-purple-500",
+        "title": "Training",
+        "description": "ai-toolkit training",
+        "icon": "Dumbbell"
+      }
+    }
+  ],
+  "nodes": []
+}
