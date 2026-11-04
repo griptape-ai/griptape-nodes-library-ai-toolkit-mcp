@@ -3,7 +3,7 @@ name = "ai-toolkit-mcp"
 version = "0.1.0"
 description = "MCP server for driving ostris/ai-toolkit LoRA training from Griptape Nodes, Claude, or any MCP client"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=2.3,<3",
